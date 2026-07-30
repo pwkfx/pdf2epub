@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package and development tools
+        run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Check formatting
+        run: ruff format --check .
+      - name: Test
+        run: pytest
+
+  epubcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and test tools
+        run: python -m pip install -e ".[dev]"
+      - name: Download EPUBCheck 5.3.0
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/w3c/epubcheck/releases/download/v5.3.0/epubcheck-5.3.0.zip \
+            --output /tmp/epubcheck.zip
+          unzip -q /tmp/epubcheck.zip -d /tmp
+      - name: Validate representative EPUB
+        env:
+          EPUBCHECK_JAR: /tmp/epubcheck-5.3.0/epubcheck.jar
+        run: pytest tests/test_epubcheck.py

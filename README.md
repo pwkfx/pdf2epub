@@ -1,45 +1,107 @@
 # PDF to EPUB Structural Converter
 
-A Python command-line tool that intelligently converts PDF documents into properly formatted EPUB books.
-
-Instead of blindly extracting text and breaking paragraphs at every visual line (a common issue with raw PDF scraping), this script uses heuristic parsing to detect natural paragraph breaks, headings, and subtitles.
+A Python 3.9+ command-line tool and library that converts text-based PDF documents into
+reflowable EPUB 3.3 books. It uses conservative layout-aware parsing to reconstruct
+paragraphs, identify chapter headings and subtitles, and remove repeated running headers,
+footers, and page numbers.
 
 ## Features
 
-- **Heuristic Paragraph Detection:** Evaluates line lengths and terminal punctuation to stitch broken PDF lines back into continuous, reflowable paragraphs.
-- **Structural HTML Tagging:** Automatically detects ALL-CAPS chapter titles and subtitles, applying `<h2>` and `<h3>` tags with custom CSS for proper visual hierarchy.
-- **Dynamic Table of Contents:** Hunts for headings and dynamically generates a functional `toc.ncx` navigation map for e-reader menus.
-- **Metadata Extraction:** Pulls the book title directly from the PDF's internal metadata (falling back to the filename if metadata is missing).
-- **Safe File Handling:** Never overwrites existing files. Automatically appends `-1`, `-2`, etc., if an output filename already exists in the directory.
-
-## Requirements
-
-- Python 3
-- `pypdf`
+- Produces EPUB 3.3 with an XHTML navigation document and NCX fallback.
+- Splits detected chapters into separate XHTML resources.
+- Uses PDF font, position, spacing, outline, and text evidence when available.
+- Extracts title and author metadata, with explicit command-line overrides.
+- Writes beside the input by default and never overwrites unless requested.
+- Validates manifest, spine, navigation resources, and anchors before writing.
+- Writes atomically so failed conversions do not leave partial output files.
 
 ## Installation
 
-Install the required text extraction library using pip:
+Install the package and its `pdf2epub` command:
 
 ```bash
-python3 -m pip install pypdf
+python3 -m pip install .
 ```
+
+For development tools:
+
+```bash
+python3 -m pip install -e ".[dev]"
+```
+
+The runtime dependency is `pypdf>=6,<7`.
 
 ## Usage
 
-Run the script from your terminal, passing the target PDF file as an argument: `python3 convert_pdf.py your_document.pdf`
+```bash
+pdf2epub INPUT [-o OUTPUT] [--title TITLE] [--author AUTHOR]
+               [--language TAG] [--overwrite] [-v]
+```
 
-Output The script will generate an .epub file in the same directory.
+Direct script execution remains supported from a source checkout:
 
-- If book.pdf is passed, it outputs book.epub.
-- If book.epub already exists, it outputs book-1.epub.
+```bash
+python3 convert_pdf.py your_document.pdf
+```
 
-## Customization
+Examples:
 
-The internal CSS can be easily modified within the script to adjust the output typography.
+```bash
+pdf2epub book.pdf
+pdf2epub book.pdf --title "A Better Title" --author "Ada Example" --language en
+pdf2epub book.pdf -o exports/book.epub --overwrite --verbose
+```
 
-**Default styling includes:**
+Metadata precedence is command-line override, then PDF metadata, then a fallback:
 
-- Justified text alignment
-- 1.5em first-line paragraph indent
-- Forced page breaks before h2 headings
+- Title falls back to the input filename.
+- Author is omitted when unavailable.
+- Language falls back to the BCP-47 `und` (undetermined) tag.
+
+## Output
+
+The script will generate an `.epub` file in the same directory as the input PDF.
+
+- If `book.pdf` is passed, it outputs `book.epub`.
+- If `book.epub` already exists, it outputs `book-1.epub`.
+- Additional collisions use `book-2.epub`, `book-3.epub`, and so on.
+- `--overwrite` replaces the exact requested path atomically.
+- A suffix-less `--output` path automatically receives `.epub`.
+
+## Python API
+
+```python
+from pdf2epub import ConversionOptions, convert_pdf
+
+result = convert_pdf(
+    "book.pdf",
+    options=ConversionOptions(language="en"),
+)
+print(result.output_path)
+```
+
+`ConversionResult` includes resolved metadata, publication UUID, chapter count, and
+non-fatal extraction warnings. Expected failures derive from `Pdf2EpubError`.
+
+## Limitations
+
+PDF is a presentation format without reliable paragraph or heading semantics, so structural
+detection is necessarily heuristic.
+
+- Image-only and scanned PDFs require OCR before conversion. This tool does not run OCR.
+- Password-protected PDFs are rejected.
+- Images, tables, hyperlinks, footnotes, columns, and detailed source formatting are not
+  preserved.
+- Unusual transformations or malformed font coordinates may trigger text-only fallback.
+- Very large uncompressed PDF content streams can require substantial memory in `pypdf`.
+
+## Development
+
+```bash
+ruff check .
+ruff format --check .
+pytest
+```
+
+Continuous integration runs on Python 3.9, 3.12, and 3.14 and validates a representative
+publication with EPUBCheck 5.3.0.

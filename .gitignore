@@ -1,1 +1,12 @@
 .DS_Store
+__pycache__/
+*.py[cod]
+*.epub
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
