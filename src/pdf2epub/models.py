@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,35 @@ class ConversionResult:
     identifier: str
     chapter_count: int
     warnings: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RepairOptions:
+    """EPUBCheck location, repair depth, and repaired-output behavior."""
+
+    epubcheck_jar: Optional[Union[str, Path]] = None
+    overwrite: bool = False
+    full_repair: bool = False
+
+
+@dataclass(frozen=True)
+class RepairResult:
+    """Summary of a completed EPUB repair."""
+
+    output_path: Path
+    epub_version: str
+    fixes: Tuple[str, ...]
+    before_fatal_count: int
+    before_error_count: int
+    before_warning_count: int
+    after_fatal_count: int
+    after_error_count: int
+    after_warning_count: int
+    warnings: Tuple[str, ...]
+    title: Optional[str] = None
+    author: Optional[str] = None
+    language: Optional[str] = None
+    chapter_count: Optional[int] = None
 
 
 @dataclass(frozen=True)

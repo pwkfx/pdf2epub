@@ -1,13 +1,21 @@
 """Public orchestration API."""
 
+import os
 from pathlib import Path
 from typing import Optional, Union
 from uuid import uuid4
 
 from .epub import write_epub
 from .errors import InputFileError
-from .models import ConversionOptions, ConversionResult, PublicationMetadata
+from .models import (
+    ConversionOptions,
+    ConversionResult,
+    PublicationMetadata,
+    RepairOptions,
+    RepairResult,
+)
 from .pdf import extract_document
+from .repair import repair_epub_archive
 from .structure import build_sections, detect_blocks
 
 PathLike = Union[str, Path]
@@ -53,6 +61,45 @@ def convert_pdf(
     )
 
 
+def repair_epub(
+    input_path: PathLike,
+    output_path: Optional[PathLike] = None,
+    *,
+    options: Optional[RepairOptions] = None,
+) -> RepairResult:
+    """Create an EPUBCheck-validated repaired copy of an EPUB.
+
+    ``RepairOptions(full_repair=True)`` additionally reconstructs book metadata,
+    chapter boundaries, reading order, and navigation as EPUB 3.3.
+    """
+
+    repair_options = options or RepairOptions()
+    source = _validate_input_path(Path(input_path))
+    destination = _resolve_repair_output_path(
+        source,
+        output_path,
+        repair_options.overwrite,
+        repair_options.full_repair,
+    )
+    outcome = repair_epub_archive(source, destination, repair_options)
+    return RepairResult(
+        output_path=destination,
+        epub_version=outcome.epub_version,
+        fixes=outcome.fixes,
+        before_fatal_count=outcome.before.fatal_count,
+        before_error_count=outcome.before.error_count,
+        before_warning_count=outcome.before.warning_count,
+        after_fatal_count=outcome.after.fatal_count,
+        after_error_count=outcome.after.error_count,
+        after_warning_count=outcome.after.warning_count,
+        warnings=outcome.warnings,
+        title=outcome.title,
+        author=outcome.author,
+        language=outcome.language,
+        chapter_count=outcome.chapter_count,
+    )
+
+
 def _validate_input_path(path: Path) -> Path:
     try:
         resolved = path.expanduser().resolve(strict=True)
@@ -80,6 +127,48 @@ def _resolve_output_path(
             raise InputFileError("Invalid output path: {}".format(output_path)) from exc
     if desired.suffix.casefold() != ".epub":
         raise InputFileError("Output file must use the .epub extension.")
+
+    parent = desired.parent
+    if not parent.exists() or not parent.is_dir():
+        raise InputFileError("Output directory does not exist: {}".format(parent))
+    if overwrite or not desired.exists():
+        return desired
+
+    counter = 1
+    while True:
+        candidate = desired.with_name("{}-{}{}".format(desired.stem, counter, desired.suffix))
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def _resolve_repair_output_path(
+    input_path: Path,
+    output_path: Optional[PathLike],
+    overwrite: bool,
+    full_repair: bool = False,
+) -> Path:
+    if output_path is None:
+        suffix = "rebuilt" if full_repair else "fixed"
+        desired = input_path.with_name("{}-{}.epub".format(input_path.stem, suffix))
+    else:
+        desired = Path(output_path).expanduser()
+        if not desired.suffix:
+            desired = desired.with_suffix(".epub")
+        try:
+            desired = desired.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise InputFileError("Invalid output path: {}".format(output_path)) from exc
+    if desired.suffix.casefold() != ".epub":
+        raise InputFileError("Output file must use the .epub extension.")
+    try:
+        same_file = desired == input_path or (
+            desired.exists() and os.path.samefile(str(desired), str(input_path))
+        )
+    except OSError:
+        same_file = desired == input_path
+    if same_file:
+        raise InputFileError("Repaired EPUB output must not replace the source file.")
 
     parent = desired.parent
     if not parent.exists() or not parent.is_dir():

@@ -1,13 +1,19 @@
-# PDF to EPUB Structural Converter
+# PDF Conversion and EPUB Repair
 
 A Python 3.9+ command-line tool and library that converts text-based PDF documents into
-reflowable EPUB 3.3 books. It uses conservative layout-aware parsing to reconstruct
-paragraphs, identify chapter headings and subtitles, and remove repeated running headers,
-footers, and page numbers.
+reflowable EPUB 3.3 books and repairs existing EPUB 2 or EPUB 3 publications.
+PDF conversion uses conservative layout-aware parsing to reconstruct paragraphs, identify
+chapter headings and subtitles, and remove repeated running headers, footers, and page
+numbers.
 
 ## Features
 
 - Produces EPUB 3.3 with an XHTML navigation document and NCX fallback.
+- Offers conservative structural repair and opt-in semantic EPUB 3.3 reconstruction.
+- Conservative repair preserves the source EPUB version, metadata, content, and resources.
+- Full repair recovers metadata, chapter files, headings, text flow, image descriptions,
+  reading order, and matching navigation.
+- Requires a clean EPUBCheck fatal/error result before publishing a repaired copy.
 - Splits detected chapters into separate XHTML resources.
 - Uses PDF font, position, spacing, outline, and text evidence when available.
 - Extracts title and author metadata, with explicit command-line overrides.
@@ -29,19 +35,28 @@ For development tools:
 python3 -m pip install -e ".[dev]"
 ```
 
-The runtime dependency is `pypdf>=6,<7`.
+The Python runtime dependencies are `pypdf>=6,<7` and `pymorphy3>=2.0.6,<3`. Pymorphy
+provides the Russian dictionary used for high-confidence full-repair OCR cleanup.
+
+EPUB repair additionally requires Java and
+[EPUBCheck](https://www.w3.org/publishing/epubcheck/). EPUBCheck is not bundled or downloaded
+at runtime. Configure its jar using `--epubcheck-jar` or `EPUBCHECK_JAR`, or install an
+`epubcheck` executable on `PATH`.
 
 ## Usage
 
 ```bash
 pdf2epub INPUT [-o OUTPUT] [--title TITLE] [--author AUTHOR]
-               [--language TAG] [--overwrite] [-v]
+               [--language TAG] [--epubcheck-jar PATH] [--full-repair]
+               [--overwrite] [-v]
 ```
 
 Direct script execution remains supported from a source checkout:
 
 ```bash
 python3 convert_pdf.py your_document.pdf
+python3 convert_pdf.py damaged_book.epub --epubcheck-jar /path/to/epubcheck.jar
+python3 convert_pdf.py damaged_book.epub --full-repair
 ```
 
 Examples:
@@ -50,7 +65,12 @@ Examples:
 pdf2epub book.pdf
 pdf2epub book.pdf --title "A Better Title" --author "Ada Example" --language en
 pdf2epub book.pdf -o exports/book.epub --overwrite --verbose
+pdf2epub damaged.epub --epubcheck-jar /path/to/epubcheck.jar --verbose
+pdf2epub poorly-structured.epub --full-repair --verbose
 ```
+
+Input type is selected from the case-insensitive `.pdf` or `.epub` extension. `--title`,
+`--author`, and `--language` apply only to PDF conversion.
 
 Metadata precedence is command-line override, then PDF metadata, then a fallback:
 
@@ -58,15 +78,73 @@ Metadata precedence is command-line override, then PDF metadata, then a fallback
 - Author is omitted when unavailable.
 - Language falls back to the BCP-47 `und` (undetermined) tag.
 
-## Output
+### EPUBCheck configuration
 
-The script will generate an `.epub` file in the same directory as the input PDF.
+EPUB repair locates EPUBCheck in this order:
+
+1. `--epubcheck-jar PATH`
+2. `EPUBCHECK_JAR`
+3. An `epubcheck` executable on `PATH`
+
+When a jar is configured, Java is located through `JAVA_HOME`, common Homebrew OpenJDK
+locations, or `PATH`. Validation warnings are printed but do not prevent output. Fatal errors
+and errors prevent output and leave the source untouched.
+
+## Output behavior
+
+PDF conversions and EPUB repairs are written atomically beside the input by default.
 
 - If `book.pdf` is passed, it outputs `book.epub`.
 - If `book.epub` already exists, it outputs `book-1.epub`.
 - Additional collisions use `book-2.epub`, `book-3.epub`, and so on.
+- If `damaged.epub` is passed, it outputs `damaged-fixed.epub`.
+- Repair collisions use `damaged-fixed-1.epub`, `damaged-fixed-2.epub`, and so on.
+- With `--full-repair`, `damaged.epub` outputs `damaged-rebuilt.epub`.
+- Full-repair collisions use `damaged-rebuilt-1.epub`, `damaged-rebuilt-2.epub`, and so on.
 - `--overwrite` replaces the exact requested path atomically.
 - A suffix-less `--output` path automatically receives `.epub`.
+- EPUB repair always preserves the source. An output path resolving to the source is rejected,
+  including with `--overwrite`.
+
+### Minimal EPUB repairs
+
+The repair pipeline currently applies only known-safe changes:
+
+- Remove an empty EPUB 2 guide.
+- Add `alt=""` to images with no `alt` attribute.
+- Replace invalid block-containing or body-level `span` wrappers with `div`.
+- Move rows out of malformed `table → tr → td → tr` wrappers.
+- Wrap orphan table-row runs in a table.
+- Store `mimetype` first and uncompressed.
+
+EPUBCheck runs before and against the temporary repaired archive. If other fatal errors or
+errors remain, the command reports them and creates no final output.
+
+### Full EPUB repair
+
+`--full-repair` first applies the conservative fixes and then rebuilds the publication as
+EPUB 3.3 with NCX fallback. It is intended for books that are technically damaged and also
+poorly structured:
+
+- Resolve title, author, and language from reliable visible book content when package
+  metadata is generic or incorrect.
+- Recover front matter, numbered chapters, appendices, and back matter from source headings.
+- Create one XHTML resource per recovered section and regenerate the OPF manifest and spine.
+- Generate a visible content page, `nav.xhtml`, and a matching NCX in recovered reading order.
+- Promote demonstrated source heading styles to semantic `h1` and `h2` elements.
+- Separate italic run-in topic labels as restrained `h3` headings without adding them to
+  publication navigation; rejoin page-split topic bodies.
+- Convert demonstrated OCR list markers (`•`, dot variants, `®`, `©`, squares, chevrons,
+  asterisks, and isolated `o/о`) into semantic `ul`/`li` lists with one CSS-controlled bullet.
+- Join embedded line-break hyphens conservatively, using Russian morphology for Cyrillic text.
+- Correct only high-confidence, demonstrated Cyrillic OCR substitutions.
+- Replace empty alternatives on recognized figures with contextual descriptions.
+- Preserve CSS, fonts, images, and other non-content resources.
+
+The original EPUB and conservative `-fixed` copy are never changed. Full repair is
+deliberately opt-in because it changes document boundaries and may upgrade EPUB 2 sources.
+The rebuilt publication is published atomically only after a clean EPUBCheck fatal/error
+result. Warnings are allowed and reported.
 
 ## Python API
 
@@ -83,6 +161,34 @@ print(result.output_path)
 `ConversionResult` includes resolved metadata, publication UUID, chapter count, and
 non-fatal extraction warnings. Expected failures derive from `Pdf2EpubError`.
 
+Repair an existing EPUB:
+
+```python
+from pdf2epub import RepairOptions, repair_epub
+
+result = repair_epub(
+    "damaged.epub",
+    options=RepairOptions(epubcheck_jar="/path/to/epubcheck.jar"),
+)
+print(result.output_path)
+print(result.fixes)
+```
+
+`RepairResult` includes EPUB version, applied fixes, before/after EPUBCheck counts, and
+warnings. Full-repair results additionally include resolved title, author, language, and
+chapter count:
+
+```python
+result = repair_epub(
+    "poorly-structured.epub",
+    options=RepairOptions(full_repair=True),
+)
+print(result.title, result.chapter_count)
+```
+
+Expected EPUB failures use focused read, repair, validation, and write exceptions under
+`Pdf2EpubError`.
+
 ## Limitations
 
 PDF is a presentation format without reliable paragraph or heading semantics, so structural
@@ -94,6 +200,18 @@ detection is necessarily heuristic.
   preserved.
 - Unusual transformations or malformed font coordinates may trigger text-only fallback.
 - Very large uncompressed PDF content streams can require substantial memory in `pypdf`.
+- Conservative EPUB repair does not correct OCR mistakes, prose, headings, TOC wording,
+  metadata, or accessibility descriptions. Missing image alternatives receive the minimally
+  valid empty value.
+- Full repair uses conservative heuristics and built-in recovery evidence. It is not a
+  substitute for human copy-editing; unresolved source OCR, malformed equations, and
+  ambiguous table cell order can remain.
+- Contextual figure descriptions help identify a figure and its surrounding subject but do
+  not fully transcribe complex charts.
+- DRM-protected, encrypted, ambiguous multi-rendition, unsafe, or structurally malformed
+  archives are rejected.
+- Conservative repair does not upgrade EPUB versions or attempt speculative fixes for
+  unknown EPUBCheck errors. Full repair intentionally rebuilds recognized sources as EPUB 3.3.
 
 ## Development
 
@@ -103,5 +221,5 @@ ruff format --check .
 pytest
 ```
 
-Continuous integration runs on Python 3.9, 3.12, and 3.14 and validates a representative
-publication with EPUBCheck 5.3.0.
+Continuous integration runs on Python 3.9, 3.12, and 3.14 and validates converted and
+repaired publications with EPUBCheck 5.3.0.

@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf2epub"
-version = "0.2.0"
-description = "Convert text-based PDF documents into reflowable EPUB 3.3 books"
+version = "0.4.0"
+description = "Convert text-based PDFs to EPUB 3.3 and repair existing EPUBs"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "pymorphy3>=2.0.6,<3",
     "pypdf>=6,<7",
 ]
 

@@ -1,4 +1,4 @@
-"""Focused errors raised by the public conversion API."""
+"""Focused errors raised by the public conversion and repair APIs."""
 
 
 class Pdf2EpubError(Exception):
@@ -19,3 +19,15 @@ class NoExtractableTextError(PdfReadError):
 
 class EpubWriteError(Pdf2EpubError):
     """The EPUB could not be assembled or written."""
+
+
+class EpubReadError(Pdf2EpubError):
+    """The source EPUB archive or package cannot be read safely."""
+
+
+class EpubRepairError(Pdf2EpubError):
+    """The source EPUB contains defects that cannot be repaired safely."""
+
+
+class EpubValidationError(EpubRepairError):
+    """EPUBCheck is unavailable or the repaired EPUB still has errors."""
