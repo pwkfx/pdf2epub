@@ -1,10 +1,9 @@
-# PDF Conversion and EPUB Repair
+# Multi-format EPUB Conversion and Repair
 
-A Python 3.9+ command-line tool and library that converts text-based PDF documents into
-reflowable EPUB 3.3 books and repairs existing EPUB 2 or EPUB 3 publications.
-PDF conversion uses conservative layout-aware parsing to reconstruct paragraphs, identify
-chapter headings and subtitles, and remove repeated running headers, footers, and page
-numbers.
+A Python 3.9+ command-line tool and library that converts PDF, Word, and DjVu documents into
+EPUB 3.3 books and repairs existing EPUB 2 or EPUB 3 publications. PDF and DjVu conversion
+uses layout-aware parsing to reconstruct paragraphs and navigation. Image-only PDF and DjVu
+pages are OCRed automatically when required.
 
 ## Features
 
@@ -20,6 +19,17 @@ numbers.
 - Writes beside the input by default and never overwrites unless requested.
 - Validates manifest, spine, navigation resources, and anchors before writing.
 - Writes atomically so failed conversions do not leave partial output files.
+- Converts DOCX semantics—including headings, lists, tables, links, footnotes, emphasis, and
+  embedded images—into sanitized reflowable XHTML.
+- Converts legacy DOC through an isolated headless LibreOffice profile and the DOCX pipeline.
+- Extracts native PDF text first and runs 300 DPI Tesseract OCR only on text-empty pages.
+- Converts DjVu hidden text into reflowable XHTML while retaining cover scans and meaningful
+  visual layers as image resources.
+- Keeps early scanned legal/title/cover pages as page-separated images, suppresses their
+  unreliable OCR overflow, and selects the strongest early visual as the package cover.
+- Offers opt-in fixed-layout DjVu facsimiles with page images and transparent selectable text.
+- Adds image resources, nested Word navigation, and DjVu page navigation to the EPUB package
+  as applicable.
 
 ## Installation
 
@@ -35,8 +45,28 @@ For development tools:
 python3 -m pip install -e ".[dev]"
 ```
 
-The Python runtime dependencies are `pypdf>=6,<7` and `pymorphy3>=2.0.6,<3`. Pymorphy
-provides the Russian dictionary used for high-confidence full-repair OCR cleanup.
+Python dependencies such as Mammoth, html5lib, pypdfium2, Pillow, pypdf, and pymorphy3 are
+installed with the package. External programs are discovered only when their feature is used:
+
+- [Tesseract](https://tesseract-ocr.github.io/tessdoc/Installation.html) is required when a
+  PDF or DjVu page needs OCR. Install the required language data too.
+- [DjVuLibre](https://djvu.sourceforge.net/) (`djvused`, `djvutxt`, and `ddjvu`) is required
+  for `.djvu` and `.djv` input.
+- [LibreOffice](https://help.libreoffice.org/latest/en-US/text/shared/guide/start_parameters.html)
+  is required only for legacy `.doc` input. `.docx` is read directly.
+
+For example:
+
+```bash
+# macOS with Homebrew
+brew install tesseract tesseract-lang djvulibre libreoffice
+
+# Debian or Ubuntu
+sudo apt-get install tesseract-ocr tesseract-ocr-rus djvulibre-bin libreoffice-writer
+```
+
+`TESSERACT_CMD`, `DJVULIBRE_BIN`, and `SOFFICE_CMD` can point to nonstandard installations.
+Pymorphy provides the Russian dictionary used for high-confidence full-repair OCR cleanup.
 
 EPUB repair additionally requires Java and
 [EPUBCheck](https://www.w3.org/publishing/epubcheck/). EPUBCheck is not bundled or downloaded
@@ -47,7 +77,8 @@ at runtime. Configure its jar using `--epubcheck-jar` or `EPUBCHECK_JAR`, or ins
 
 ```bash
 pdf2epub INPUT [-o OUTPUT] [--title TITLE] [--author AUTHOR]
-               [--language TAG] [--epubcheck-jar PATH] [--full-repair]
+               [--language TAG] [--ocr-language CODE[+CODE]] [--no-ocr]
+               [--djvu-facsimile] [--epubcheck-jar PATH] [--full-repair]
                [--overwrite] [-v]
 ```
 
@@ -63,16 +94,25 @@ Examples:
 
 ```bash
 pdf2epub book.pdf
+pdf2epub scanned-book.pdf --ocr-language eng+rus
+pdf2epub report.docx
+pdf2epub old-report.doc
+pdf2epub archive.djvu --language ru
+pdf2epub archive.djvu --djvu-facsimile
 pdf2epub book.pdf --title "A Better Title" --author "Ada Example" --language en
 pdf2epub book.pdf -o exports/book.epub --overwrite --verbose
 pdf2epub damaged.epub --epubcheck-jar /path/to/epubcheck.jar --verbose
 pdf2epub poorly-structured.epub --full-repair --verbose
 ```
 
-Input type is selected from the case-insensitive `.pdf` or `.epub` extension. `--title`,
-`--author`, and `--language` apply only to PDF conversion.
+Input type is selected from the case-insensitive `.pdf`, `.doc`, `.docx`, `.djvu`, `.djv`,
+or `.epub` extension. `--title`, `--author`, and `--language` apply to document conversion.
+`--ocr-language` accepts installed Tesseract codes such as `eng`, `rus`, or `eng+rus`;
+`--no-ocr` disables automatic PDF and DjVu OCR. `--djvu-facsimile` selects fixed-layout DjVu
+output; the default is a normal reflowable book.
 
-Metadata precedence is command-line override, then PDF metadata, then a fallback:
+Metadata precedence is command-line override, then source metadata when available, then a
+fallback:
 
 - Title falls back to the input filename.
 - Author is omitted when unavailable.
@@ -92,9 +132,9 @@ and errors prevent output and leave the source untouched.
 
 ## Output behavior
 
-PDF conversions and EPUB repairs are written atomically beside the input by default.
+Document conversions and EPUB repairs are written atomically beside the input by default.
 
-- If `book.pdf` is passed, it outputs `book.epub`.
+- If `book.pdf`, `book.docx`, or `book.djvu` is passed, it outputs `book.epub`.
 - If `book.epub` already exists, it outputs `book-1.epub`.
 - Additional collisions use `book-2.epub`, `book-3.epub`, and so on.
 - If `damaged.epub` is passed, it outputs `damaged-fixed.epub`.
@@ -149,17 +189,20 @@ result. Warnings are allowed and reported.
 ## Python API
 
 ```python
-from pdf2epub import ConversionOptions, convert_pdf
+from pdf2epub import ConversionOptions, convert_document
 
-result = convert_pdf(
-    "book.pdf",
-    options=ConversionOptions(language="en"),
+result = convert_document(
+    "scanned-book.pdf",
+    options=ConversionOptions(language="en", ocr_language="eng"),
 )
 print(result.output_path)
 ```
 
-`ConversionResult` includes resolved metadata, publication UUID, chapter count, and
-non-fatal extraction warnings. Expected failures derive from `Pdf2EpubError`.
+`convert_document` dispatches PDF, DOC, DOCX, DjVu, and DJV files. `convert_pdf` remains
+available for callers that require PDF-only validation. `ConversionResult` includes resolved
+metadata, publication UUID, source format, chapter and page counts, embedded image count, OCR
+page count, and non-fatal warnings. Expected failures derive from `Pdf2EpubError`; focused
+document, DjVu, OCR, and missing-dependency errors are public.
 
 Repair an existing EPUB:
 
@@ -191,13 +234,22 @@ Expected EPUB failures use focused read, repair, validation, and write exception
 
 ## Limitations
 
-PDF is a presentation format without reliable paragraph or heading semantics, so structural
-detection is necessarily heuristic.
+PDF and DjVu are presentation formats without reliable paragraph or heading semantics, so
+structural detection is necessarily heuristic.
 
-- Image-only and scanned PDFs require OCR before conversion. This tool does not run OCR.
 - Password-protected PDFs are rejected.
-- Images, tables, hyperlinks, footnotes, columns, and detailed source formatting are not
-  preserved.
+- PDF images, tables, hyperlinks, footnotes, columns, and detailed source formatting are not
+  preserved; scan images are used for OCR but are not embedded in reflowable PDF output.
+- PDF OCR replaces only pages with no meaningful native text. A wholly textless PDF fails
+  when OCR is disabled or produces no text.
+- Word output is semantic and reflowable rather than a visual reproduction of Word pages.
+- DjVu reflow preserves hidden/OCR text, covers, and meaningful background visual layers.
+  Foreground line art inseparably mixed with the DjVu text mask may not be recoverable as an
+  independent illustration. Use `--djvu-facsimile` when exact page fidelity is required.
+- A DjVu page remains as an image with a warning when OCR finds no words.
+- OCR quality depends on installing the correct Tesseract language data. Explicit unavailable
+  `--ocr-language` values fail; inferred unavailable languages fall back to English with a
+  warning.
 - Unusual transformations or malformed font coordinates may trigger text-only fallback.
 - Very large uncompressed PDF content streams can require substantial memory in `pypdf`.
 - Conservative EPUB repair does not correct OCR mistakes, prose, headings, TOC wording,
@@ -222,4 +274,9 @@ pytest
 ```
 
 Continuous integration runs on Python 3.9, 3.12, and 3.14 and validates converted and
-repaired publications with EPUBCheck 5.3.0.
+repaired publications with EPUBCheck 5.3.0. A Python 3.12 job also exercises external tools.
+Run those integration tests locally with:
+
+```bash
+PDF2EPUB_RUN_EXTERNAL_TESTS=1 pytest -m external_tools
+```

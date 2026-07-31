@@ -14,6 +14,16 @@ _CHAPTER_LABEL = re.compile(
     r"^(?:chapter|part|book|section|volume|глава|часть|книга)\b",
     re.IGNORECASE,
 )
+_CHAPTER_PREFIX = re.compile(
+    r"^(?:chapter|part|book|section|volume|глава|часть|книга)\s+"
+    r"(?:\d+|[ivxlcdm]+)(?:\s|$)",
+    re.IGNORECASE,
+)
+_CHAPTER_ONLY = re.compile(
+    r"^(?:chapter|part|book|section|volume|глава|часть|книга)\s+"
+    r"(?:\d+|[ivxlcdm]+)$",
+    re.IGNORECASE,
+)
 
 
 def detect_blocks(document: ExtractedDocument) -> Tuple[Block, ...]:
@@ -30,28 +40,71 @@ def detect_blocks(document: ExtractedDocument) -> Tuple[Block, ...]:
     outline_titles = {_normalize(value) for value in document.outline_titles}
     blocks: List[Block] = []
     paragraph_parts: List[str] = []
+    paragraph_page: List[Optional[int]] = [None]
     previous_line: Optional[TextLine] = None
+    previous_was_heading = False
 
     def flush_paragraph() -> None:
         if not paragraph_parts:
             return
         text = re.sub(r"\s+", " ", "".join(paragraph_parts)).strip()
         if text:
-            blocks.append(Block("paragraph", text))
+            blocks.append(Block("paragraph", text, page_number=paragraph_page[0]))
         paragraph_parts.clear()
+        paragraph_page[0] = None
 
     for index, line in enumerate(lines):
         next_line = lines[index + 1] if index + 1 < len(lines) else None
-        if _is_heading(line, next_line, body_size, outline_titles, index == 0):
+        heading_continuation = bool(
+            previous_was_heading
+            and _continues_chapter_heading(
+                blocks,
+                previous_line,
+                line,
+            )
+        )
+        if heading_continuation or _is_heading(
+            line,
+            next_line,
+            body_size,
+            outline_titles,
+            index == 0,
+        ):
             flush_paragraph()
-            blocks.append(Block("heading", line.text.strip()))
+            heading_text = line.text.strip()
+            if heading_continuation:
+                heading_text = heading_text.upper()
+            if (
+                blocks
+                and blocks[-1].kind == "heading"
+                and (
+                    blocks[-1].page_number == line.page_number
+                    or (
+                        _CHAPTER_LABEL.match(blocks[-1].text)
+                        and previous_line is not None
+                        and previous_line.page_end
+                        and line.page_start
+                    )
+                )
+            ):
+                parts = [blocks[-1].text]
+                _append_line(parts, heading_text)
+                blocks[-1] = Block(
+                    "heading",
+                    "".join(parts),
+                    page_number=line.page_number,
+                )
+            else:
+                blocks.append(Block("heading", heading_text, page_number=line.page_number))
             previous_line = line
+            previous_was_heading = True
             continue
 
-        if _is_subtitle(line, blocks, body_size):
+        if previous_was_heading and _is_subtitle(line, blocks, body_size):
             flush_paragraph()
-            blocks.append(Block("subtitle", line.text.strip()))
+            blocks.append(Block("subtitle", line.text.strip(), page_number=line.page_number))
             previous_line = line
+            previous_was_heading = False
             continue
 
         if paragraph_parts and _starts_new_paragraph(
@@ -63,8 +116,11 @@ def detect_blocks(document: ExtractedDocument) -> Tuple[Block, ...]:
         ):
             flush_paragraph()
 
+        if not paragraph_parts:
+            paragraph_page[0] = line.page_number
         _append_line(paragraph_parts, line.text.strip())
         previous_line = line
+        previous_was_heading = False
 
     flush_paragraph()
     return tuple(blocks)
@@ -229,7 +285,8 @@ def _is_heading(
     document_start: bool,
 ) -> bool:
     text = line.text.strip()
-    if len(text) > 120 or not any(character.isalpha() for character in text):
+    letter_count = sum(character.isalpha() for character in text)
+    if len(text) > 120 or letter_count < 4:
         return False
     if _normalize(text) in outline_titles:
         return True
@@ -239,19 +296,67 @@ def _is_heading(
     if line.gap_before is not None and body_size is not None:
         separated_before = separated_before or line.gap_before > body_size * 1.5
 
-    if body_size is not None and line.font_size is not None:
+    if body_size is not None and line.font_size is not None and line.font_size_reliable:
         large = line.font_size >= body_size * 1.35
         emphasized = line.bold and line.font_size >= body_size * 1.15
-        return (large or emphasized) and (separated_before or separated_after or line.centered)
+        if (large or emphasized) and (separated_before or separated_after or line.centered):
+            return True
 
     uppercase = text.isupper()
     words = re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
     chapter_label = bool(_CHAPTER_LABEL.match(text))
-    conservative_shape = len(words) >= 2 or chapter_label
+    next_is_title = bool(
+        next_line is not None
+        and not re.match(r"^\s*\d", next_line.text)
+        and not next_line.text.rstrip().endswith(_SUBTITLE_PUNCTUATION)
+        and len(next_line.text.strip()) <= 120
+        and (_looks_uppercase(next_line.text) or next_line.centered)
+    )
+    if chapter_label and separated_before and (next_is_title or (line.centered and line.page_end)):
+        return True
+    centered_label = bool(line.centered and len(words) == 1 and len(text) >= 4)
+    conservative_shape = len(words) >= 2 or chapter_label or centered_label
     location_signal = separated_before and (separated_after or document_start or line.page_start)
     if next_line is not None and next_line.page_number != line.page_number:
         location_signal = separated_before and separated_after
     return uppercase and conservative_shape and location_signal
+
+
+def _continues_chapter_heading(
+    blocks: Sequence[Block],
+    previous_line: Optional[TextLine],
+    line: TextLine,
+) -> bool:
+    if (
+        not blocks
+        or blocks[-1].kind != "heading"
+        or not _CHAPTER_PREFIX.match(blocks[-1].text)
+        or previous_line is None
+    ):
+        return False
+    same_page = previous_line.page_number == line.page_number
+    adjacent_page = previous_line.page_end and line.page_start
+    if not (same_page or adjacent_page):
+        return False
+    text = line.text.strip()
+    if (
+        not text
+        or len(text) > 120
+        or re.match(r"^\d", text)
+        or text.endswith(_SUBTITLE_PUNCTUATION)
+    ):
+        return False
+    chapter_only = bool(_CHAPTER_ONLY.fullmatch(blocks[-1].text.strip()))
+    if chapter_only:
+        return _looks_uppercase(text) or line.centered
+    return line.centered and not line.blank_before
+
+
+def _looks_uppercase(text: str) -> bool:
+    letters = [character for character in text if character.isalpha()]
+    return (
+        bool(letters) and sum(character.isupper() for character in letters) / len(letters) >= 0.65
+    )
 
 
 def _is_subtitle(
@@ -303,6 +408,9 @@ def _starts_new_paragraph(
 def _append_line(parts: List[str], text: str) -> None:
     if not parts:
         parts.append(text)
+    elif parts[-1].endswith("\u00ad"):
+        parts[-1] = parts[-1][:-1]
+        parts.append(text.lstrip())
     elif parts[-1].endswith("-"):
         parts.append(text.lstrip())
     else:

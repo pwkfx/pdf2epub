@@ -22,6 +22,7 @@ def write_pdf(
     language: Optional[str] = None,
     outline_title: Optional[str] = None,
     encrypted: bool = False,
+    image_only: bool = False,
 ) -> Path:
     writer = PdfWriter()
     fonts = {
@@ -55,6 +56,8 @@ def write_pdf(
                     _escape_pdf_text(text),
                 )
             )
+        if image_only and not commands:
+            commands.append("q 1 0 0 1 0 0 cm Q")
         content = DecodedStreamObject()
         content.set_data("\n".join(commands).encode("latin-1"))
         page[NameObject("/Contents")] = writer._add_object(content)

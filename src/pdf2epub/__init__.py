@@ -1,13 +1,17 @@
-"""Public interface for PDF conversion and EPUB repair."""
+"""Public interface for document conversion and EPUB repair."""
 
-from .api import convert_pdf, repair_epub
+from .api import convert_document, convert_pdf, repair_epub
 from .errors import (
+    DjvuReadError,
+    DocumentReadError,
     EpubReadError,
     EpubRepairError,
     EpubValidationError,
     EpubWriteError,
     InputFileError,
+    MissingDependencyError,
     NoExtractableTextError,
+    OcrError,
     Pdf2EpubError,
     PdfReadError,
 )
@@ -16,18 +20,23 @@ from .models import ConversionOptions, ConversionResult, RepairOptions, RepairRe
 __all__ = [
     "ConversionOptions",
     "ConversionResult",
+    "DjvuReadError",
+    "DocumentReadError",
     "EpubReadError",
     "EpubRepairError",
     "EpubValidationError",
     "EpubWriteError",
     "InputFileError",
+    "MissingDependencyError",
     "NoExtractableTextError",
+    "OcrError",
     "Pdf2EpubError",
     "PdfReadError",
     "RepairOptions",
     "RepairResult",
+    "convert_document",
     "convert_pdf",
     "repair_epub",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

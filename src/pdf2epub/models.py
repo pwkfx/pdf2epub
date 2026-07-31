@@ -13,6 +13,9 @@ class ConversionOptions:
     author: Optional[str] = None
     language: Optional[str] = None
     overwrite: bool = False
+    ocr_enabled: bool = True
+    ocr_language: Optional[str] = None
+    djvu_facsimile: bool = False
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,10 @@ class ConversionResult:
     identifier: str
     chapter_count: int
     warnings: Tuple[str, ...]
+    source_format: str = "pdf"
+    page_count: int = 0
+    image_count: int = 0
+    ocr_page_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,7 @@ class TextLine:
     blank_after: bool = False
     page_start: bool = False
     page_end: bool = False
+    font_size_reliable: bool = True
 
     @property
     def has_layout(self) -> bool:
@@ -103,12 +111,16 @@ class ExtractedDocument:
     language: Optional[str]
     outline_titles: Tuple[str, ...]
     warnings: Tuple[str, ...]
+    ocr_page_count: int = 0
 
 
 @dataclass(frozen=True)
 class Block:
     kind: str
     text: str
+    page_number: Optional[int] = None
+    resource_href: Optional[str] = None
+    alt: str = ""
 
 
 @dataclass(frozen=True)
@@ -118,3 +130,54 @@ class Section:
     blocks: Tuple[Block, ...]
     navigation_id: str
     is_preface: bool = False
+
+
+@dataclass(frozen=True)
+class EpubResource:
+    """A non-spine resource stored below the EPUB content directory."""
+
+    filename: str
+    media_type: str
+    content: bytes
+    properties: str = ""
+
+
+@dataclass(frozen=True)
+class RenderedSection:
+    """A complete generated XHTML spine resource."""
+
+    filename: str
+    title: str
+    content: bytes
+    viewport: Optional[Tuple[int, int]] = None
+
+
+@dataclass(frozen=True)
+class NavigationEntry:
+    """A potentially nested table-of-contents entry."""
+
+    title: str
+    href: str
+    children: Tuple["NavigationEntry", ...] = ()
+
+
+@dataclass(frozen=True)
+class PageEntry:
+    """An EPUB page-list target."""
+
+    label: str
+    href: str
+
+
+@dataclass(frozen=True)
+class PreparedPublication:
+    """Format-neutral publication resources ready for EPUB assembly."""
+
+    sections: Tuple[RenderedSection, ...]
+    resources: Tuple[EpubResource, ...] = ()
+    navigation: Tuple[NavigationEntry, ...] = ()
+    page_list: Tuple[PageEntry, ...] = ()
+    fixed_layout: bool = False
+    warnings: Tuple[str, ...] = ()
+    ocr_page_count: int = 0
+    page_count: int = 0

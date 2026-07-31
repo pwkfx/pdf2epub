@@ -6,9 +6,26 @@ from pathlib import Path
 
 import pytest
 
-from pdf2epub import ConversionOptions, RepairOptions, convert_pdf, repair_epub
+from pdf2epub import (
+    ConversionOptions,
+    RepairOptions,
+    convert_document,
+    convert_pdf,
+    repair_epub,
+)
+from pdf2epub.djvu import _page_xhtml, _WordBox
+from pdf2epub.epub import write_publication
+from pdf2epub.models import (
+    EpubResource,
+    NavigationEntry,
+    PageEntry,
+    PreparedPublication,
+    PublicationMetadata,
+    RenderedSection,
+)
 from pdf2epub.repair import _resolve_java
 
+from .docx_factory import write_docx
 from .epub_factory import basic_xhtml, write_epub
 from .pdf_factory import write_pdf
 
@@ -43,6 +60,65 @@ def test_representative_epub_passes_epubcheck(tmp_path: Path) -> None:
 
     completed = subprocess.run(
         [_resolve_java(), "-jar", jar, str(result.output_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_word_conversion_passes_epubcheck(tmp_path: Path) -> None:
+    jar = os.environ.get("EPUBCHECK_JAR")
+    if not jar:
+        pytest.skip("EPUBCHECK_JAR is not configured")
+    source = write_docx(tmp_path / "word.docx")
+    result = convert_document(source)
+
+    completed = subprocess.run(
+        [_resolve_java(), "-jar", jar, str(result.output_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_fixed_layout_publication_passes_epubcheck(tmp_path: Path) -> None:
+    jar = os.environ.get("EPUBCHECK_JAR")
+    if not jar:
+        pytest.skip("EPUBCHECK_JAR is not configured")
+    metadata = PublicationMetadata("Facsimile", None, "en", "urn:uuid:fixed")
+    filename = "pages/page-0001.xhtml"
+    page_id = "page-1"
+    section = RenderedSection(
+        filename,
+        "Page 1",
+        _page_xhtml(
+            "en",
+            1,
+            "images/page.png",
+            1,
+            1,
+            (_WordBox("Text", 0, 0, 1, 1),),
+            page_id,
+        ),
+        viewport=(1, 1),
+    )
+    page_target = "{}#{}".format(filename, page_id)
+    publication = PreparedPublication(
+        sections=(section,),
+        resources=(EpubResource("images/page.png", "image/png", _PNG_1X1),),
+        navigation=(NavigationEntry("Facsimile", page_target),),
+        page_list=(PageEntry("1", page_target),),
+        fixed_layout=True,
+    )
+    output = tmp_path / "fixed.epub"
+    write_publication(output, metadata, publication, overwrite=False)
+
+    completed = subprocess.run(
+        [_resolve_java(), "-jar", jar, str(output)],
         text=True,
         capture_output=True,
         check=False,

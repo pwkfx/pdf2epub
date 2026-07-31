@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, Union
 from uuid import uuid4
 
-from .epub import write_epub
+from .epub import write_epub, write_publication
 from .errors import InputFileError
 from .models import (
     ConversionOptions,
@@ -27,17 +27,57 @@ def convert_pdf(
     *,
     options: Optional[ConversionOptions] = None,
 ) -> ConversionResult:
-    """Convert a text-based PDF into an EPUB publication.
+    """Convert a PDF into an EPUB publication, using OCR when needed.
 
     The default output is placed beside the input. Unless ``overwrite`` is enabled,
     an available ``-1``, ``-2``, ... suffix is selected when the destination exists.
     """
 
-    conversion_options = options or ConversionOptions()
     source = _validate_input_path(Path(input_path))
-    destination = _resolve_output_path(source, output_path, conversion_options.overwrite)
+    if source.suffix.casefold() != ".pdf":
+        raise InputFileError("PDF conversion requires a file using the .pdf extension.")
+    return _convert_document_source(source, output_path, options or ConversionOptions())
 
-    document = extract_document(source)
+
+def convert_document(
+    input_path: PathLike,
+    output_path: Optional[PathLike] = None,
+    *,
+    options: Optional[ConversionOptions] = None,
+) -> ConversionResult:
+    """Convert PDF, DOC, DOCX, or DjVu input into an EPUB publication."""
+
+    source = _validate_input_path(Path(input_path))
+    if source.suffix.casefold() not in {".pdf", ".doc", ".docx", ".djvu", ".djv"}:
+        raise InputFileError("Convertible input must use .pdf, .doc, .docx, .djvu, or .djv.")
+    return _convert_document_source(source, output_path, options or ConversionOptions())
+
+
+def _convert_document_source(
+    source: Path,
+    output_path: Optional[PathLike],
+    conversion_options: ConversionOptions,
+) -> ConversionResult:
+    destination = _resolve_output_path(source, output_path, conversion_options.overwrite)
+    suffix = source.suffix.casefold()
+    if suffix == ".pdf":
+        return _convert_pdf_source(source, destination, conversion_options)
+    if suffix in {".doc", ".docx"}:
+        return _convert_word_source(source, destination, conversion_options)
+    return _convert_djvu_source(source, destination, conversion_options)
+
+
+def _convert_pdf_source(
+    source: Path,
+    destination: Path,
+    conversion_options: ConversionOptions,
+) -> ConversionResult:
+    document = extract_document(
+        source,
+        ocr_enabled=conversion_options.ocr_enabled,
+        ocr_language=conversion_options.ocr_language,
+        publication_language=conversion_options.language,
+    )
     warnings = list(document.warnings)
     title = _metadata_value(conversion_options.title, document.title, source.stem)
     author = _metadata_value(conversion_options.author, document.author, None)
@@ -58,6 +98,95 @@ def convert_pdf(
         identifier=identifier,
         chapter_count=chapter_count,
         warnings=tuple(warnings),
+        source_format="pdf",
+        page_count=len(document.pages),
+        image_count=0,
+        ocr_page_count=document.ocr_page_count,
+    )
+
+
+def _convert_word_source(
+    source: Path,
+    destination: Path,
+    conversion_options: ConversionOptions,
+) -> ConversionResult:
+    from .word import build_word_publication, extract_word_document
+
+    document = extract_word_document(source)
+    warnings = list(document.warnings)
+    title = _metadata_value(conversion_options.title, document.title, source.stem)
+    author = _metadata_value(conversion_options.author, document.author, None)
+    language = _resolve_language(conversion_options.language, document.language, warnings)
+    identifier = "urn:uuid:{}".format(uuid4())
+    metadata = PublicationMetadata(title, author, language, identifier)
+    publication = build_word_publication(document, metadata)
+    write_publication(
+        destination,
+        metadata,
+        publication,
+        overwrite=conversion_options.overwrite,
+    )
+    chapter_count = max(
+        1,
+        sum("chapter-" in section.filename for section in publication.sections),
+    )
+    return ConversionResult(
+        output_path=destination,
+        title=title,
+        author=author,
+        language=language,
+        identifier=identifier,
+        chapter_count=chapter_count,
+        warnings=tuple(dict.fromkeys(warnings + list(publication.warnings))),
+        source_format=source.suffix.casefold().lstrip("."),
+        page_count=0,
+        image_count=len(publication.resources),
+        ocr_page_count=0,
+    )
+
+
+def _convert_djvu_source(
+    source: Path,
+    destination: Path,
+    conversion_options: ConversionOptions,
+) -> ConversionResult:
+    from .djvu import build_djvu_publication
+
+    warnings = []
+    title = _metadata_value(conversion_options.title, None, source.stem)
+    author = _metadata_value(conversion_options.author, None, None)
+    language = _resolve_language(conversion_options.language, None, warnings)
+    identifier = "urn:uuid:{}".format(uuid4())
+    metadata = PublicationMetadata(title, author, language, identifier)
+    publication = build_djvu_publication(
+        source,
+        metadata,
+        ocr_enabled=conversion_options.ocr_enabled,
+        ocr_language=conversion_options.ocr_language,
+        facsimile=conversion_options.djvu_facsimile,
+    )
+    write_publication(
+        destination,
+        metadata,
+        publication,
+        overwrite=conversion_options.overwrite,
+    )
+    warnings.extend(publication.warnings)
+    return ConversionResult(
+        output_path=destination,
+        title=title,
+        author=author,
+        language=language,
+        identifier=identifier,
+        chapter_count=max(
+            1,
+            sum("chapter-" in section.filename for section in publication.sections),
+        ),
+        warnings=tuple(dict.fromkeys(warnings)),
+        source_format=source.suffix.casefold().lstrip("."),
+        page_count=publication.page_count or len(publication.sections),
+        image_count=len(publication.resources),
+        ocr_page_count=publication.ocr_page_count,
     )
 
 
@@ -207,7 +336,7 @@ def _resolve_language(
             return _validate_language(extracted)
         except InputFileError:
             warnings.append(
-                "The PDF language metadata {!r} is invalid; using 'und'.".format(extracted)
+                "The source language metadata {!r} is invalid; using 'und'.".format(extracted)
             )
     return "und"
 

@@ -56,6 +56,101 @@ def test_outline_title_is_a_heading_without_font_evidence() -> None:
     assert blocks[0].text == "Opening"
 
 
+def test_centered_uppercase_label_is_heading_even_when_smaller_than_body() -> None:
+    document = _document(
+        [
+            _line(
+                "INTRODUCTION",
+                size=10,
+                centered=True,
+                page_start=True,
+                blank_after=True,
+            ),
+            _line("The body text follows the centered label.", size=12),
+        ]
+    )
+
+    blocks = detect_blocks(document)
+
+    assert [block.kind for block in blocks] == ["heading", "paragraph"]
+
+
+def test_consecutive_same_page_heading_lines_are_combined() -> None:
+    document = _document(
+        [
+            _line(
+                "A MULTI-",
+                size=24,
+                centered=True,
+                page_start=True,
+                blank_before=True,
+            ),
+            _line(
+                "LINE HEADING",
+                size=24,
+                centered=True,
+                blank_after=True,
+            ),
+            _line("The chapter starts here.", size=12),
+        ]
+    )
+
+    blocks = detect_blocks(document)
+
+    assert blocks[0].kind == "heading"
+    assert blocks[0].text == "A MULTI-LINE HEADING"
+
+
+def test_title_case_chapter_label_and_centered_title_are_combined() -> None:
+    document = _document(
+        [
+            _line(
+                "Глава 1",
+                centered=True,
+                page_start=True,
+                blank_before=True,
+            ),
+            _line(
+                "ГНОСТИЦИЗМ",
+                centered=True,
+                blank_after=True,
+            ),
+            _line(
+                "Первый абзац главы заканчивается точкой.",
+                blank_before=True,
+            ),
+            _line("Он продолжается на следующей строке."),
+        ]
+    )
+
+    blocks = detect_blocks(document)
+
+    assert [block.kind for block in blocks] == ["heading", "paragraph"]
+    assert blocks[0].text == "Глава 1 ГНОСТИЦИЗМ"
+    assert (
+        blocks[1].text
+        == "Первый абзац главы заканчивается точкой. Он продолжается на следующей строке."
+    )
+
+
+def test_chapter_note_label_before_a_numbered_note_is_not_a_heading() -> None:
+    document = _document(
+        [
+            _line(
+                "Глава 1",
+                centered=True,
+                page_start=True,
+                blank_before=True,
+            ),
+            _line("1 Первая пронумерованная сноска продолжается здесь."),
+        ]
+    )
+
+    blocks = detect_blocks(document)
+
+    assert [block.kind for block in blocks] == ["paragraph"]
+
+
 def test_hyphenated_line_wrap_has_no_inserted_space() -> None:
     document = _document(
         [

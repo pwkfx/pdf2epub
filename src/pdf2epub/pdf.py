@@ -10,7 +10,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 from pypdf import PdfReader, mult
 from pypdf.errors import PdfReadError as PyPdfReadError
 
-from .errors import NoExtractableTextError, PdfReadError
+from .errors import MissingDependencyError, NoExtractableTextError, PdfReadError
 from .models import ExtractedDocument, ExtractedPage, TextLine
 
 
@@ -23,7 +23,13 @@ class _Fragment:
     font_name: str
 
 
-def extract_document(path: Path) -> ExtractedDocument:
+def extract_document(
+    path: Path,
+    *,
+    ocr_enabled: bool = True,
+    ocr_language: Optional[str] = None,
+    publication_language: Optional[str] = None,
+) -> ExtractedDocument:
     """Read a PDF once and return normalized pages plus source metadata."""
 
     try:
@@ -38,7 +44,7 @@ def extract_document(path: Path) -> ExtractedDocument:
     outline_titles = _read_outline_titles(reader)
     pages: List[ExtractedPage] = []
     warnings: List[str] = []
-    extracted_characters = 0
+    ocr_candidates: List[int] = []
 
     try:
         for number, page in enumerate(reader.pages, 1):
@@ -78,7 +84,6 @@ def extract_document(path: Path) -> ExtractedDocument:
                     fragments.append(_Fragment(segment, x, y, size, font_name))
 
             plain_text = page.extract_text(visitor_text=collect) or ""
-            extracted_characters += sum(character.isprintable() for character in plain_text)
             lines = _layout_lines(
                 fragments,
                 plain_text,
@@ -95,6 +100,12 @@ def extract_document(path: Path) -> ExtractedDocument:
                         "text heuristics were used.".format(number)
                     )
             pages.append(ExtractedPage(number, width, height, tuple(lines)))
+            if (
+                not plain_text.strip()
+                and not any(line.text.strip() for line in lines)
+                and _page_has_renderable_content(page)
+            ):
+                ocr_candidates.append(number - 1)
     except MemoryError as exc:
         raise PdfReadError("PDF text extraction exhausted available memory.") from exc
     except (OSError, PyPdfReadError, ValueError) as exc:
@@ -102,12 +113,26 @@ def extract_document(path: Path) -> ExtractedDocument:
     except Exception as exc:
         raise PdfReadError("Unexpected PDF extraction failure: {}".format(exc)) from exc
 
-    if extracted_characters == 0 or not any(
-        line.text.strip() for page in pages for line in page.lines
-    ):
+    ocr_page_count = 0
+    if ocr_candidates and ocr_enabled:
+        ocr_page_count = _ocr_pdf_pages(
+            path,
+            pages,
+            ocr_candidates,
+            requested_language=ocr_language,
+            publication_language=publication_language or language,
+            warnings=warnings,
+        )
+
+    if not any(line.text.strip() for page in pages for line in page.lines):
+        if ocr_candidates and not ocr_enabled:
+            detail = "OCR is disabled."
+        elif ocr_candidates:
+            detail = "OCR produced no usable text."
+        else:
+            detail = "The PDF appears to be empty."
         raise NoExtractableTextError(
-            "No extractable text was found. The PDF may be empty or image-based; "
-            "run OCR (for example, Tesseract or OCRmyPDF) before converting it."
+            "No extractable text was found. {} Enable OCR for image-based PDFs.".format(detail)
         )
 
     return ExtractedDocument(
@@ -117,7 +142,93 @@ def extract_document(path: Path) -> ExtractedDocument:
         language=language,
         outline_titles=outline_titles,
         warnings=tuple(warnings),
+        ocr_page_count=ocr_page_count,
     )
+
+
+def _page_has_renderable_content(page: Any) -> bool:
+    try:
+        contents = page.get_contents()
+        if contents is None:
+            return False
+        return bool(contents.get_data().strip())
+    except Exception:
+        return True
+
+
+def _ocr_pdf_pages(
+    path: Path,
+    pages: List[ExtractedPage],
+    page_indexes: Sequence[int],
+    *,
+    requested_language: Optional[str],
+    publication_language: Optional[str],
+    warnings: List[str],
+) -> int:
+    try:
+        import pypdfium2 as pdfium
+    except ImportError as exc:
+        raise MissingDependencyError(
+            "PDF OCR rendering requires the 'pypdfium2' Python package."
+        ) from exc
+
+    from .ocr import recognize_image
+
+    try:
+        document = pdfium.PdfDocument(str(path))
+    except Exception as exc:
+        raise PdfReadError("Unable to render PDF pages for OCR: {}".format(exc)) from exc
+
+    recognized_pages = 0
+    try:
+        for page_index in page_indexes:
+            source_page = None
+            bitmap = None
+            try:
+                source_page = document[page_index]
+                bitmap = source_page.render(scale=300.0 / 72.0)
+                image = bitmap.to_pil().copy()
+                extracted_page = pages[page_index]
+                result = recognize_image(
+                    image,
+                    extracted_page.number,
+                    extracted_page.width,
+                    extracted_page.height,
+                    requested_language=requested_language,
+                    publication_language=publication_language,
+                    warnings=warnings,
+                )
+            except (MissingDependencyError, NoExtractableTextError):
+                raise
+            except Exception as exc:
+                from .errors import OcrError
+
+                if isinstance(exc, OcrError):
+                    raise
+                raise PdfReadError(
+                    "Unable to render PDF page {} for OCR: {}".format(page_index + 1, exc)
+                ) from exc
+            finally:
+                if bitmap is not None:
+                    with suppress(Exception):
+                        bitmap.close()
+                if source_page is not None:
+                    with suppress(Exception):
+                        source_page.close()
+            if result.lines:
+                pages[page_index] = ExtractedPage(
+                    extracted_page.number,
+                    extracted_page.width,
+                    extracted_page.height,
+                    result.lines,
+                )
+                recognized_pages += 1
+            else:
+                warnings.append("OCR found no text on PDF page {}.".format(page_index + 1))
+    finally:
+        with suppress(Exception):
+            document.close()
+    return recognized_pages
 
 
 def _read_metadata(reader: PdfReader) -> Tuple[Optional[str], Optional[str], Optional[str]]:

@@ -5,11 +5,17 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Dict, List, Sequence
 from xml.etree import ElementTree as ET
 
 from .errors import EpubWriteError
-from .models import PublicationMetadata, Section
+from .models import (
+    NavigationEntry,
+    PageEntry,
+    PreparedPublication,
+    PublicationMetadata,
+    Section,
+)
 
 _CONTAINER_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
 _DC_NS = "http://purl.org/dc/elements/1.1/"
@@ -48,6 +54,62 @@ p {
   margin: 0.3em 0;
   line-height: 1.4;
 }
+img {
+  max-width: 100%;
+  height: auto;
+}
+figure {
+  margin: 1em auto;
+  text-align: center;
+}
+.front-matter-page {
+  break-after: page;
+  page-break-after: always;
+}
+.front-matter-page img {
+  max-height: 94vh;
+  object-fit: contain;
+}
+table {
+  border-collapse: collapse;
+  margin: 1em auto;
+  max-width: 100%;
+}
+td, th {
+  border: 1px solid #888;
+  padding: 0.3em;
+}
+li > p {
+  text-indent: 0;
+}
+body.fixed-page {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.facsimile {
+  position: relative;
+  margin: 0;
+}
+.facsimile-image, .text-layer {
+  position: absolute;
+  inset: 0;
+}
+.facsimile-image {
+  width: 100%;
+  height: 100%;
+}
+.text-layer span {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  line-height: 1;
+  transform-origin: left top;
+  user-select: text;
+}
+.text-layer span::selection {
+  background: rgba(60, 130, 255, 0.35);
+}
 """
 
 
@@ -64,7 +126,32 @@ def write_epub(
         raise EpubWriteError("Cannot create an EPUB without content sections.")
     resources = _build_resources(metadata, sections)
     _validate_resources(resources)
+    _write_resources(output_path, resources, overwrite=overwrite)
 
+
+def write_publication(
+    output_path: Path,
+    metadata: PublicationMetadata,
+    publication: PreparedPublication,
+    *,
+    overwrite: bool,
+) -> None:
+    """Validate and atomically write a resource-rich EPUB publication."""
+
+    if not publication.sections:
+        raise EpubWriteError("Cannot create an EPUB without content sections.")
+    resources = _build_publication_resources(metadata, publication)
+    _validate_resources(resources)
+    _validate_embedded_targets(resources)
+    _write_resources(output_path, resources, overwrite=overwrite)
+
+
+def _write_resources(
+    output_path: Path,
+    resources: Dict[str, bytes],
+    *,
+    overwrite: bool,
+) -> None:
     output_path = output_path.resolve(strict=False)
     if output_path.exists() and not overwrite:
         raise EpubWriteError("Output file already exists: {}".format(output_path))
@@ -109,6 +196,38 @@ def write_epub(
                 pass
             except OSError:
                 pass
+
+
+def _build_publication_resources(
+    metadata: PublicationMetadata,
+    publication: PreparedPublication,
+) -> Dict[str, bytes]:
+    resources: Dict[str, bytes] = {
+        "mimetype": b"application/epub+zip",
+        "META-INF/container.xml": _container_xml(),
+        "EPUB/styles/book.css": _CSS.encode("utf-8"),
+    }
+    seen = set(resources)
+    for section in publication.sections:
+        name = "EPUB/{}".format(section.filename)
+        if name in seen:
+            raise EpubWriteError("Duplicate generated EPUB resource: {}".format(name))
+        seen.add(name)
+        resources[name] = section.content
+    for resource in publication.resources:
+        name = "EPUB/{}".format(resource.filename)
+        if name in seen:
+            raise EpubWriteError("Duplicate generated EPUB resource: {}".format(name))
+        seen.add(name)
+        resources[name] = resource.content
+    resources["EPUB/nav.xhtml"] = _publication_navigation_xhtml(
+        metadata,
+        publication.navigation,
+        publication.page_list,
+    )
+    resources["EPUB/toc.ncx"] = _publication_ncx(metadata, publication.navigation)
+    resources["EPUB/package.opf"] = _publication_package_document(metadata, publication)
+    return resources
 
 
 def _build_resources(
@@ -170,6 +289,22 @@ def _section_xhtml(metadata: PublicationMetadata, section: Section) -> bytes:
     body = ET.SubElement(root, _qualified(_XHTML_NS, "body"))
     heading_written = False
     for block in section.blocks:
+        if block.kind in {"image", "front-image"} and block.resource_href:
+            attributes = {"class": "front-matter-page"} if block.kind == "front-image" else {}
+            figure = ET.SubElement(
+                body,
+                _qualified(_XHTML_NS, "figure"),
+                attributes,
+            )
+            ET.SubElement(
+                figure,
+                _qualified(_XHTML_NS, "img"),
+                {
+                    "src": "../{}".format(block.resource_href),
+                    "alt": _xml_text(block.alt),
+                },
+            )
+            continue
         if block.kind == "heading":
             attributes = {}
             if not heading_written:
@@ -363,6 +498,225 @@ def _package_document(
     return _serialize(root)
 
 
+def _publication_navigation_xhtml(
+    metadata: PublicationMetadata,
+    entries: Sequence[NavigationEntry],
+    page_list: Sequence[PageEntry],
+) -> bytes:
+    ET.register_namespace("", _XHTML_NS)
+    ET.register_namespace("epub", _EPUB_NS)
+    root = ET.Element(
+        _qualified(_XHTML_NS, "html"),
+        {
+            "lang": metadata.language,
+            _qualified(_XML_NS, "lang"): metadata.language,
+        },
+    )
+    head = ET.SubElement(root, _qualified(_XHTML_NS, "head"))
+    ET.SubElement(head, _qualified(_XHTML_NS, "title")).text = "Contents"
+    ET.SubElement(
+        head,
+        _qualified(_XHTML_NS, "link"),
+        {"rel": "stylesheet", "type": "text/css", "href": "styles/book.css"},
+    )
+    body = ET.SubElement(root, _qualified(_XHTML_NS, "body"))
+    navigation = ET.SubElement(
+        body,
+        _qualified(_XHTML_NS, "nav"),
+        {_qualified(_EPUB_NS, "type"): "toc", "id": "toc"},
+    )
+    ET.SubElement(navigation, _qualified(_XHTML_NS, "h1")).text = "Contents"
+    ordered_list = ET.SubElement(navigation, _qualified(_XHTML_NS, "ol"))
+    _append_navigation_entries(ordered_list, entries)
+
+    if page_list:
+        pages = ET.SubElement(
+            body,
+            _qualified(_XHTML_NS, "nav"),
+            {_qualified(_EPUB_NS, "type"): "page-list", "id": "page-list"},
+        )
+        ET.SubElement(pages, _qualified(_XHTML_NS, "h2")).text = "Pages"
+        pages_list = ET.SubElement(pages, _qualified(_XHTML_NS, "ol"))
+        for page in page_list:
+            item = ET.SubElement(pages_list, _qualified(_XHTML_NS, "li"))
+            ET.SubElement(
+                item,
+                _qualified(_XHTML_NS, "a"),
+                {"href": page.href},
+            ).text = _xml_text(page.label)
+    return _serialize(root)
+
+
+def _append_navigation_entries(
+    parent: ET.Element,
+    entries: Sequence[NavigationEntry],
+) -> None:
+    for entry in entries:
+        item = ET.SubElement(parent, _qualified(_XHTML_NS, "li"))
+        ET.SubElement(
+            item,
+            _qualified(_XHTML_NS, "a"),
+            {"href": entry.href},
+        ).text = _xml_text(entry.title)
+        if entry.children:
+            child_list = ET.SubElement(item, _qualified(_XHTML_NS, "ol"))
+            _append_navigation_entries(child_list, entry.children)
+
+
+def _publication_ncx(
+    metadata: PublicationMetadata,
+    entries: Sequence[NavigationEntry],
+) -> bytes:
+    ET.register_namespace("", _NCX_NS)
+    root = ET.Element(_qualified(_NCX_NS, "ncx"), {"version": "2005-1"})
+    head = ET.SubElement(root, _qualified(_NCX_NS, "head"))
+    ET.SubElement(
+        head,
+        _qualified(_NCX_NS, "meta"),
+        {"name": "dtb:uid", "content": metadata.identifier},
+    )
+    ET.SubElement(
+        head,
+        _qualified(_NCX_NS, "meta"),
+        {"name": "dtb:depth", "content": str(max(1, _navigation_depth(entries)))},
+    )
+    ET.SubElement(
+        head,
+        _qualified(_NCX_NS, "meta"),
+        {"name": "dtb:totalPageCount", "content": "0"},
+    )
+    ET.SubElement(
+        head,
+        _qualified(_NCX_NS, "meta"),
+        {"name": "dtb:maxPageNumber", "content": "0"},
+    )
+    doc_title = ET.SubElement(root, _qualified(_NCX_NS, "docTitle"))
+    ET.SubElement(doc_title, _qualified(_NCX_NS, "text")).text = _xml_text(metadata.title)
+    if metadata.author:
+        doc_author = ET.SubElement(root, _qualified(_NCX_NS, "docAuthor"))
+        ET.SubElement(doc_author, _qualified(_NCX_NS, "text")).text = _xml_text(metadata.author)
+    navigation_map = ET.SubElement(root, _qualified(_NCX_NS, "navMap"))
+    play_order = [0]
+    _append_ncx_entries(navigation_map, entries, play_order)
+    return _serialize(root, doctype=_NCX_DOCTYPE)
+
+
+def _append_ncx_entries(
+    parent: ET.Element,
+    entries: Sequence[NavigationEntry],
+    play_order: List[int],
+) -> None:
+    for entry in entries:
+        play_order[0] += 1
+        point = ET.SubElement(
+            parent,
+            _qualified(_NCX_NS, "navPoint"),
+            {
+                "id": "navPoint-{}".format(play_order[0]),
+                "playOrder": str(play_order[0]),
+            },
+        )
+        label = ET.SubElement(point, _qualified(_NCX_NS, "navLabel"))
+        ET.SubElement(label, _qualified(_NCX_NS, "text")).text = _xml_text(entry.title)
+        ET.SubElement(
+            point,
+            _qualified(_NCX_NS, "content"),
+            {"src": entry.href},
+        )
+        _append_ncx_entries(point, entry.children, play_order)
+
+
+def _navigation_depth(entries: Sequence[NavigationEntry]) -> int:
+    if not entries:
+        return 0
+    return max(1 + _navigation_depth(entry.children) for entry in entries)
+
+
+def _publication_package_document(
+    metadata: PublicationMetadata,
+    publication: PreparedPublication,
+) -> bytes:
+    ET.register_namespace("", _OPF_NS)
+    ET.register_namespace("dc", _DC_NS)
+    root = ET.Element(
+        _qualified(_OPF_NS, "package"),
+        {
+            "version": "3.0",
+            "unique-identifier": "pub-id",
+            _qualified(_XML_NS, "lang"): metadata.language,
+        },
+    )
+    metadata_element = ET.SubElement(root, _qualified(_OPF_NS, "metadata"))
+    ET.SubElement(
+        metadata_element,
+        _qualified(_DC_NS, "identifier"),
+        {"id": "pub-id"},
+    ).text = _xml_text(metadata.identifier)
+    ET.SubElement(metadata_element, _qualified(_DC_NS, "title")).text = _xml_text(metadata.title)
+    ET.SubElement(metadata_element, _qualified(_DC_NS, "language")).text = _xml_text(
+        metadata.language
+    )
+    if metadata.author:
+        ET.SubElement(metadata_element, _qualified(_DC_NS, "creator")).text = _xml_text(
+            metadata.author
+        )
+    ET.SubElement(
+        metadata_element,
+        _qualified(_OPF_NS, "meta"),
+        {"property": "dcterms:modified"},
+    ).text = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if publication.fixed_layout:
+        for property_name, value in (
+            ("rendition:layout", "pre-paginated"),
+            ("rendition:orientation", "auto"),
+            ("rendition:spread", "none"),
+        ):
+            ET.SubElement(
+                metadata_element,
+                _qualified(_OPF_NS, "meta"),
+                {"property": property_name},
+            ).text = value
+
+    manifest = ET.SubElement(root, _qualified(_OPF_NS, "manifest"))
+    for item_id, href, media_type, properties in (
+        ("nav", "nav.xhtml", "application/xhtml+xml", "nav"),
+        ("ncx", "toc.ncx", "application/x-dtbncx+xml", ""),
+        ("css", "styles/book.css", "text/css", ""),
+    ):
+        attributes = {"id": item_id, "href": href, "media-type": media_type}
+        if properties:
+            attributes["properties"] = properties
+        ET.SubElement(manifest, _qualified(_OPF_NS, "item"), attributes)
+    for index, section in enumerate(publication.sections, 1):
+        ET.SubElement(
+            manifest,
+            _qualified(_OPF_NS, "item"),
+            {
+                "id": "section-{}".format(index),
+                "href": section.filename,
+                "media-type": "application/xhtml+xml",
+            },
+        )
+    for index, resource in enumerate(publication.resources, 1):
+        attributes = {
+            "id": "resource-{}".format(index),
+            "href": resource.filename,
+            "media-type": resource.media_type,
+        }
+        if resource.properties:
+            attributes["properties"] = resource.properties
+        ET.SubElement(manifest, _qualified(_OPF_NS, "item"), attributes)
+
+    spine = ET.SubElement(root, _qualified(_OPF_NS, "spine"), {"toc": "ncx"})
+    for index, _section in enumerate(publication.sections, 1):
+        ET.SubElement(
+            spine,
+            _qualified(_OPF_NS, "itemref"),
+            {("idref"): "section-{}".format(index)},
+        )
+    return _serialize(root)
+
+
 def _validate_resources(resources: Dict[str, bytes]) -> None:
     try:
         package = ET.fromstring(resources["EPUB/package.opf"])
@@ -389,6 +743,33 @@ def _validate_resources(resources: Dict[str, bytes]) -> None:
         raise EpubWriteError("Generated EPUB resources are invalid: {}".format(exc)) from exc
 
 
+def _validate_embedded_targets(resources: Dict[str, bytes]) -> None:
+    for name, content in resources.items():
+        if not name.endswith((".xhtml", ".html", ".htm")):
+            continue
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError as exc:
+            raise EpubWriteError("Generated XHTML resource is invalid: {}".format(name)) from exc
+        for element in root.iter():
+            local_name = element.tag.rsplit("}", 1)[-1]
+            attribute = "src" if local_name == "img" else None
+            if local_name == "link" and element.attrib.get("rel") == "stylesheet":
+                attribute = "href"
+            if attribute is None or attribute not in element.attrib:
+                continue
+            target = element.attrib[attribute].split("#", 1)[0]
+            if not target or "://" in target or target.startswith(("data:", "/")):
+                continue
+            import posixpath
+
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
+            if resolved not in resources:
+                raise EpubWriteError(
+                    "XHTML resource references a missing resource: {} from {}".format(target, name)
+                )
+
+
 def _validate_navigation_targets(
     navigation_content: bytes,
     resources: Dict[str, bytes],
@@ -409,7 +790,12 @@ def _validate_navigation_targets(
 
 def _xml_text(value: str) -> str:
     return "".join(
-        character for character in str(value) if character in "\t\n\r" or ord(character) >= 0x20
+        character
+        for character in str(value)
+        if character in "\t\n\r"
+        or 0x20 <= ord(character) <= 0xD7FF
+        or 0xE000 <= ord(character) <= 0xFFFD
+        or 0x10000 <= ord(character) <= 0x10FFFF
     )
 
 

@@ -17,6 +17,22 @@ class NoExtractableTextError(PdfReadError):
     """The PDF contains no text that pypdf can extract."""
 
 
+class DocumentReadError(Pdf2EpubError):
+    """A Word document cannot be parsed or converted."""
+
+
+class DjvuReadError(Pdf2EpubError):
+    """A DjVu document cannot be decoded."""
+
+
+class OcrError(Pdf2EpubError):
+    """OCR could not be completed."""
+
+
+class MissingDependencyError(Pdf2EpubError):
+    """An optional external conversion tool is not installed."""
+
+
 class EpubWriteError(Pdf2EpubError):
     """The EPUB could not be assembled or written."""
 
